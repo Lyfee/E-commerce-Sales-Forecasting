@@ -2,20 +2,11 @@ import os
 import sys
 from datetime import datetime
 from typing import List, Union
-import matplotlib.pyplot as plt
-plt.style.use('bmh')
 import numpy as np
 import pandas as pd
-from scipy import signal
-import seaborn as sns
-from pathlib import Path
 import holidays
-import pickle
 from sklearn.decomposition import PCA
 import re
-import glob
-import warnings
-from pandas.errors import SettingWithCopyWarning
 import torch
 import lightning.pytorch as pl
 from lightning.pytorch.loggers import TensorBoardLogger
@@ -24,7 +15,6 @@ from pytorch_forecasting.metrics import QuantileLoss
 from pytorch_forecasting.data.encoders import GroupNormalizer, NaNLabelEncoder
 from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping
 from transformers import BertTokenizer, BertModel
-import pickle
 from pytorch_lightning import LightningModule
 from pytorch_forecasting.models.temporal_fusion_transformer.tuning import optimize_hyperparameters
 from pytorch_forecasting.models.temporal_fusion_transformer import TemporalFusionTransformer
@@ -34,7 +24,8 @@ import argparse
 from clip import clip
 from PIL import Image
 from train_util import read_train_df, split_by_product
-warnings.simplefilter("error", category=SettingWithCopyWarning)
+import warnings
+warnings.simplefilter('ignore')
 
 config = {
     "model": "tft",
@@ -53,7 +44,7 @@ config = {
         ],
 
     "batch_size": 64,
-    "train_batch_size": 10,
+    "train_batch_size": 5,
     "gradient_clip_val": 0.1,
     "learning_rate": 0.001,
     "hidden_size": 128,

@@ -119,7 +119,7 @@ class SalesGRU(nn.Module):
         return out
 
 config = {
-    "dataset_path": "US_8903_Picture_cleaned.csv",
+    "dataset_path": "us.csv",
     'max_prediction_length': 3,
     'batch_size': 64,
     'learning_rate': 0.005,
@@ -128,8 +128,7 @@ config = {
     "num_workers": 4,
     "train_ratio": 0.8,
     "max_encoder_length": 30,
-    "train_batch_size": 10,
-    "time_varying_unknown_reals": ['sale',"log_sale" ,'price', 'duration', 'views', 'avg_sale_by_id'],
+    "train_batch_size": 5,
 
     "dynamic_features": [
             'product_time_idx', 'weekday_cos', 'weekday_sin', 'week_cos', 'week_sin',
