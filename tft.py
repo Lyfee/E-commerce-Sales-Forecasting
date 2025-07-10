@@ -25,6 +25,8 @@ from clip import clip
 from PIL import Image
 from train_util import read_train_df, split_by_product
 import warnings
+import pickle
+import hashlib
 warnings.simplefilter('ignore')
 
 config = {
@@ -34,7 +36,7 @@ config = {
     "train_logger": TensorBoardLogger(save_dir='logs', name='train'),
 
     "max_prediction_length": 2,
-    "max_encoder_length": 30,
+    "max_encoder_length": 20,
     "train_ratio": 0.8,
     "time_varying_unknown_reals": ['sale', "log_sale", 'views', 'avg_sale_by_id'],
     "dynamic_features": [
@@ -43,7 +45,7 @@ config = {
             'duration', 'views', 'avg_sale_by_id'
         ],
 
-    "batch_size": 64,
+    "batch_size": 512,
     "train_batch_size": 5,
     "gradient_clip_val": 0.1,
     "learning_rate": 0.001,
@@ -62,6 +64,33 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 bert_model = BertModel.from_pretrained("bert-base-uncased").to(device)
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 logger.info(f"loaded model: bert, clip.")
+
+def get_cache_key(data, model_type):
+    """Generate a unique cache key based on input data and model type"""
+    if isinstance(data, pd.Series):
+        data_str = str(data.values.tolist())
+    else:
+        data_str = str(data)
+    combined = f"{model_type}_{data_str}"
+    return hashlib.md5(combined.encode()).hexdigest()
+
+def save_cache(data, cache_key, cache_dir="feature_cache"):
+    """Save processed features to cache"""
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+    with open(cache_path, 'wb') as f:
+        pickle.dump(data, f)
+    logger.info(f"Saved cache to {cache_path}")
+
+def load_cache(cache_key, cache_dir="feature_cache"):
+    """Load processed features from cache"""
+    cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+    if os.path.exists(cache_path):
+        with open(cache_path, 'rb') as f:
+            data = pickle.load(f)
+        logger.info(f"Loaded cache from {cache_path}")
+        return data
+    return None
 
 def get_bert_embedding(text):
     inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512).to(device)
@@ -108,31 +137,118 @@ def process_train_data(config):
     if config["model"] == "tft":
         pass
     elif config["model"] == "btft":
-        train["bert_embedding"] = train["title"].apply(get_bert_embedding)
-        bert_embedding_size = train["bert_embedding"].iloc[0].shape[0]
-        bert_embedding_df = pd.DataFrame(train["bert_embedding"].tolist(), index=train.index)
-        train = pd.concat([train, bert_embedding_df.add_prefix('bert_embedding_')], axis=1)
+        # Try to load cached BERT embeddings
+        cache_key = get_cache_key(train["title"], "btft_bert")
+        cached_features = load_cache(cache_key)
 
-        new_features = [f"bert_embedding_{i}" for i in range(len(bert_embedding_df.columns))]
+        if cached_features is not None:
+            logger.info("Using cached BERT embeddings")
+            train = pd.concat([train, cached_features], axis=1)
+            bert_embedding_size = cached_features.shape[1]
+            new_features = [f"bert_embedding_{i}" for i in range(bert_embedding_size)]
+        else:
+            logger.info("Computing BERT embeddings...")
+            train["bert_embedding"] = train["title"].apply(get_bert_embedding)
+            bert_embedding_size = train["bert_embedding"].iloc[0].shape[0]
+            bert_embedding_df = pd.DataFrame(train["bert_embedding"].tolist(), index=train.index)
+            bert_embedding_df = bert_embedding_df.add_prefix('bert_embedding_')
+
+            # Save to cache
+            save_cache(bert_embedding_df, cache_key)
+            new_features = [f"bert_embedding_{i}" for i in range(len(bert_embedding_df.columns))]
+
         if config["use_pca"]:
-            new_features = get_pca_feature(train, "bert_embedding", 10)
-        config["time_varying_unknown_reals"] = ['sale',"log_sale" ,'price', 'duration', 'views', 'avg_sale_by_id'] + new_features
+            # Apply PCA to the processed embedding columns
+            bert_embedding_cols = [col for col in train.columns if col.startswith('bert_embedding_')]
+
+            if bert_embedding_cols:
+                bert_embedding_matrix = train[bert_embedding_cols].values
+                pca_bert = PCA(n_components=5)
+                reduced_bert_embeddings = pca_bert.fit_transform(bert_embedding_matrix)
+
+                for i in range(reduced_bert_embeddings.shape[1]):
+                    train[f'bert_embedding_pca_{i+1}'] = reduced_bert_embeddings[:, i]
+                new_features = [f"bert_embedding_pca_{i+1}" for i in range(reduced_bert_embeddings.shape[1])]
+            else:
+                new_features = []
+        config["time_varying_unknown_reals"] = config["time_varying_unknown_reals"] + new_features
     elif config["model"] == "mtft":
-        train["clip_text_embedding"] = train["title"].apply(get_clip_text_embedding)
-        clip_text_embedding_size = train["clip_text_embedding"].iloc[0].shape[0]
-        clip_text_embedding_df = pd.DataFrame(train["clip_text_embedding"].tolist(), index=train.index)
-        train = pd.concat([train, clip_text_embedding_df.add_prefix('clip_text_embedding_')], axis=1)
+        # Try to load cached CLIP text embeddings
+        text_cache_key = get_cache_key(train["title"], "mtft_clip_text")
+        cached_text_features = load_cache(text_cache_key)
 
-        train["clip_image_embedding"] = train["live_screenshot"].apply(get_clip_image_embedding)
-        clip_image_embedding_size = train["clip_image_embedding"].iloc[0].shape[0]
-        clip_image_embedding_df = pd.DataFrame(train["clip_image_embedding"].tolist(), index=train.index)
-        train = pd.concat([train, clip_image_embedding_df.add_prefix('clip_image_embedding_')], axis=1)
+        if cached_text_features is not None:
+            logger.info("Using cached CLIP text embeddings")
+            train = pd.concat([train, cached_text_features], axis=1)
+            clip_text_embedding_size = cached_text_features.shape[1]
+            text_features = [f"clip_text_embedding_{i}" for i in range(clip_text_embedding_size)]
+        else:
+            logger.info("Computing CLIP text embeddings...")
+            train["clip_text_embedding"] = train["title"].apply(get_clip_text_embedding)
+            clip_text_embedding_size = train["clip_text_embedding"].iloc[0].shape[0]
+            clip_text_embedding_df = pd.DataFrame(train["clip_text_embedding"].tolist(), index=train.index)
+            clip_text_embedding_df = clip_text_embedding_df.add_prefix('clip_text_embedding_')
 
-        new_features = [f"clip_text_embedding_{i}" for i in range(len(clip_text_embedding_df.columns))] + [f"clip_image_embedding_{i}" for i in range(len(clip_image_embedding_df.columns))]
+            # Save to cache
+            save_cache(clip_text_embedding_df, text_cache_key)
+
+            train = pd.concat([train, clip_text_embedding_df], axis=1)
+            text_features = [f"clip_text_embedding_{i}" for i in range(len(clip_text_embedding_df.columns))]
+
+        # Try to load cached CLIP image embeddings
+        image_cache_key = get_cache_key(train["live_screenshot"], "mtft_clip_image")
+        cached_image_features = load_cache(image_cache_key)
+
+        if cached_image_features is not None:
+            logger.info("Using cached CLIP image embeddings")
+            train = pd.concat([train, cached_image_features], axis=1)
+            clip_image_embedding_size = cached_image_features.shape[1]
+            image_features = [f"clip_image_embedding_{i}" for i in range(clip_image_embedding_size)]
+        else:
+            logger.info("Computing CLIP image embeddings...")
+            train["clip_image_embedding"] = train["live_screenshot"].apply(get_clip_image_embedding)
+            clip_image_embedding_size = train["clip_image_embedding"].iloc[0].shape[0]
+            clip_image_embedding_df = pd.DataFrame(train["clip_image_embedding"].tolist(), index=train.index)
+            clip_image_embedding_df = clip_image_embedding_df.add_prefix('clip_image_embedding_')
+
+            # Save to cache
+            save_cache(clip_image_embedding_df, image_cache_key)
+
+            train = pd.concat([train, clip_image_embedding_df], axis=1)
+            image_features = [f"clip_image_embedding_{i}" for i in range(len(clip_image_embedding_df.columns))]
+
+        new_features = text_features + image_features
+
         if config["use_pca"]:
-            new_features = get_pca_feature(train, "clip_text_embedding", 5)
-            new_features += get_pca_feature(train, "clip_image_embedding", 5)
-        config["time_varying_unknown_reals"] = ['sale',"log_sale" ,'price', 'duration', 'views', 'avg_sale_by_id'] + new_features
+            # Apply PCA to the processed embedding columns
+            text_embedding_cols = [col for col in train.columns if col.startswith('clip_text_embedding_')]
+            image_embedding_cols = [col for col in train.columns if col.startswith('clip_image_embedding_')]
+
+            if text_embedding_cols:
+                text_embedding_matrix = train[text_embedding_cols].values
+                pca_text = PCA(n_components=3)
+                reduced_text_embeddings = pca_text.fit_transform(text_embedding_matrix)
+
+                for i in range(reduced_text_embeddings.shape[1]):
+                    train[f'clip_text_embedding_pca_{i+1}'] = reduced_text_embeddings[:, i]
+                text_pca_features = [f"clip_text_embedding_pca_{i+1}" for i in range(reduced_text_embeddings.shape[1])]
+            else:
+                text_pca_features = []
+
+            if image_embedding_cols:
+                image_embedding_matrix = train[image_embedding_cols].values
+                pca_image = PCA(n_components=3)
+                reduced_image_embeddings = pca_image.fit_transform(image_embedding_matrix)
+
+                for i in range(reduced_image_embeddings.shape[1]):
+                    train[f'clip_image_embedding_pca_{i+1}'] = reduced_image_embeddings[:, i]
+                image_pca_features = [f"clip_image_embedding_pca_{i+1}" for i in range(reduced_image_embeddings.shape[1])]
+            else:
+                image_pca_features = []
+
+            new_features = text_pca_features + image_pca_features
+            #new_features = text_pca_features
+        config["time_varying_unknown_reals"] = config["time_varying_unknown_reals"] + new_features
     else:
         raise(f"Unkown model: {config['model']}!")
     logger.info("process text and image feature done.")
@@ -166,8 +282,8 @@ def train(config, training, validation):
 
     validation_dataset = TimeSeriesDataSet.from_dataset(training_dataset, validation, predict=True, stop_randomization=True)
 
-    train_dataloader = training_dataset.to_dataloader(train=True, batch_size=config["batch_size"], num_workers=4)
-    val_dataloader = validation_dataset.to_dataloader(train=False, batch_size=config["batch_size"] * 10, num_workers=4)
+    train_dataloader = training_dataset.to_dataloader(train=True, batch_size=config["batch_size"], num_workers=8)
+    val_dataloader = validation_dataset.to_dataloader(train=False, batch_size=config["batch_size"] * 10, num_workers=8)
 
     lr_logger = LearningRateMonitor(logging_interval='step')
     early_stop_callback = EarlyStopping(monitor='val_loss', patience=5)
@@ -177,7 +293,6 @@ def train(config, training, validation):
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         gradient_clip_val=config["gradient_clip_val"],
-        limit_train_batches=30,
         log_every_n_steps=10,
         callbacks=[lr_logger, early_stop_callback],
         logger=config["train_logger"],
@@ -197,7 +312,8 @@ def train(config, training, validation):
         reduce_on_plateau_patience=4,
         share_single_variable_networks=config["share_single_variable_networks"],
         causal_attention=config["causal_attention"],
-        optimizer='adam'
+        optimizer='adamw',
+        weight_decay=0.01
     )
 
     trainer.fit(
