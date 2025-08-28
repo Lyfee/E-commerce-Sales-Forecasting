@@ -163,7 +163,7 @@ def process_train_data(config):
 
             if bert_embedding_cols:
                 bert_embedding_matrix = train[bert_embedding_cols].values
-                pca_bert = PCA(n_components=5)
+                pca_bert = PCA(n_components=10)
                 reduced_bert_embeddings = pca_bert.fit_transform(bert_embedding_matrix)
 
                 for i in range(reduced_bert_embeddings.shape[1]):
@@ -226,7 +226,7 @@ def process_train_data(config):
 
             if text_embedding_cols:
                 text_embedding_matrix = train[text_embedding_cols].values
-                pca_text = PCA(n_components=3)
+                pca_text = PCA(n_components=5)
                 reduced_text_embeddings = pca_text.fit_transform(text_embedding_matrix)
 
                 for i in range(reduced_text_embeddings.shape[1]):
@@ -237,7 +237,7 @@ def process_train_data(config):
 
             if image_embedding_cols:
                 image_embedding_matrix = train[image_embedding_cols].values
-                pca_image = PCA(n_components=3)
+                pca_image = PCA(n_components=5)
                 reduced_image_embeddings = pca_image.fit_transform(image_embedding_matrix)
 
                 for i in range(reduced_image_embeddings.shape[1]):
